@@ -1,0 +1,734 @@
+#
+# This is a Shiny web application. You can run the application by clicking
+# the 'Run App' button above.
+#
+# Find out more about building applications with Shiny here:
+#
+#    https://shiny.posit.co/
+#
+
+library(shiny)
+library(shinydashboard)
+library(survival)
+library(ggplot2)
+library(rmarkdown)
+library(kableExtra)
+library(broom)
+library(kableExtra)
+library(dplyr)
+library(fresh)
+
+# ============================================================
+#  GLOBAL: load models + define prediction functions
+# ============================================================
+
+load("risk_models_new.RData")
+
+# Summary of models
+
+## For fit_ph_scaled_con
+hr_table_con <- broom::tidy(fit_ph_scaled_con, exponentiate = FALSE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate(
+    # Replace HR and CIs with exp(coef)
+    HR = exp(estimate),
+    `95% Lower CI` = exp(conf.low),
+    `95% Upper CI` = exp(conf.high),
+    
+    # Reverse interpretation for avg_cct_per40_thinner
+    HR = ifelse(term == "avg_cct_per40_thinner", exp(-estimate), HR),
+    `95% Lower CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.high), `95% Lower CI`),
+    `95% Upper CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.low), `95% Upper CI`),
+    
+    n = fit_ph_scaled_con$n,
+    `No. of events` = fit_ph_scaled_con$nevent) %>% 
+  select(-estimate, -conf.low, -conf.high) %>% 
+  rename(`Baseline Variable` = term, `P Value` = p.value) %>%
+  relocate(c(n, `No. of events`), .after = `Baseline Variable`) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4))) %>% relocate(`P Value`, .after = `95% Upper CI` ) 
+
+# %>% 
+#   kable(caption = "Final Multivariate Model using only control patients") %>% 
+#   kable_styling(latex_options = c("striped", "hold_position"))
+
+
+
+## For fit_ph_scaled_con_gen
+hr_table_con_gen <- broom::tidy(fit_ph_scaled_con_gen, exponentiate = FALSE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate(
+    # Replace HR and CIs with exp(coef)
+    HR = exp(estimate),
+    `95% Lower CI` = exp(conf.low),
+    `95% Upper CI` = exp(conf.high),
+    
+    # Reverse interpretation for avg_cct_per40_thinner
+    HR = ifelse(term == "avg_cct_per40_thinner", exp(-estimate), HR),
+    `95% Lower CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.high), `95% Lower CI`),
+    `95% Upper CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.low), `95% Upper CI`),
+    
+    n = fit_ph_scaled_con_gen$n,
+    `No. of events` = fit_ph_scaled_con_gen$nevent) %>% 
+  select(-estimate, -conf.low, -conf.high) %>% 
+  rename(`Baseline Variable` = term, `P Value` = p.value) %>%
+  relocate(c(n, `No. of events`), .after = `Baseline Variable`) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4))) %>% relocate(`P Value`, .after = `95% Upper CI` )
+
+# %>% 
+#   kable(caption = "Final Multivariate Model with genetic variables using only control patients") %>% 
+#   kable_styling(latex_options = c("striped", "hold_position"))
+
+
+
+## For fit_ph_cat_con_label
+hr_table_cat_con <- broom::tidy(fit_ph_cat_con_label, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat_con_label$n,
+          `No.of events` = fit_ph_cat_con_label$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 4))) 
+
+# %>% 
+#   kable(caption = "Final Multivariate Categorical-based Model using only control patients") %>% 
+#   kable_styling(latex_options = c("striped", "hold_position"))
+
+
+
+## For fit_ph_cat_con_gen_label
+hr_table_cat_con_gen <- broom::tidy(fit_ph_cat_con_gen_label, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat_con_gen_label$n,
+          `No.of events` = fit_ph_cat_con_gen_label$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 5))) 
+
+# %>% 
+#   kable(caption = "Final Multivariate Categorical-based Model with gebetic variables using only control patients") %>% 
+#   kable_styling(latex_options = c("striped", "hold_position"))
+
+
+
+
+# 1. Continuous (no genetics)
+risk_prediction_5yr_scaled <- function(fit, age = 60, avg_iop = 20, avg_cct = 530,
+                                       avg_vcdr = 0.6, avg_psd = 2.4) {
+  newdata <- data.frame(
+    age_decade = age / 10,
+    avg_base_iop = avg_iop,
+    avg_cct_per40_thinner = avg_cct / 40,
+    avg_base_vcdr_per01 = avg_vcdr / 0.1,
+    avg_psd_per02 = avg_psd / 0.2
+  )
+  
+  pred <- survfit(fit, newdata = newdata)
+  surv_5yr <- summary(pred, times = 5)$surv
+  
+  list(
+    survfit = pred,
+    risk_5yr = 1 - surv_5yr,
+    newdata = newdata
+  )
+}
+
+# 2. Continuous (with genetics)
+risk_prediction_5yr_scaled_gen <- function(fit, age = 60, avg_iop = 20, avg_cct = 530,
+                                           avg_vcdr = 0.6, avg_psd = 2.4,
+                                           TMCO1 = "A/A", CDKN2B.AS1 = "A/A",
+                                           ADAMTS18.NUDT7 = "C/C", PLCE1 = "A/A",
+                                           GABRG2 = "G/G") {
+  
+  newdata <- data.frame(
+    age_decade = age / 10,
+    avg_base_iop = avg_iop,
+    avg_cct_per40_thinner = avg_cct / 40,
+    avg_base_vcdr_per01 = avg_vcdr / 0.1,
+    avg_psd_per02 = avg_psd / 0.2,
+    TMCO1_cat = factor(TMCO1, levels = fit$xlevels$TMCO1_cat),
+    `CDKN2B-AS1_cat` = factor(CDKN2B.AS1, levels = fit$xlevels$`CDKN2B-AS1_cat`),
+    `ADAMTS18/NUDT7_cat` = factor(ADAMTS18.NUDT7, levels = fit$xlevels$`ADAMTS18/NUDT7_cat`),
+    PLCE1_cat = factor(PLCE1, levels = fit$xlevels$PLCE1_cat),
+    GABRG2_cat = factor(GABRG2, levels = fit$xlevels$GABRG2_cat),
+    check.names = FALSE
+  )
+  
+  pred <- survfit(fit, newdata = newdata)
+  surv_5yr <- summary(pred, times = 5)$surv
+  
+  list(
+    survfit = pred,
+    risk_5yr = 1 - surv_5yr,
+    newdata = newdata
+  )
+}
+
+# 3. Categorical (no genetics)
+risk_prediction_5yr_cat <- function(fit, age, avg_iop, avg_cct, avg_vcdr, avg_psd) {
+  
+  newdata <- data.frame(
+    age_cat = factor(age, levels = fit$xlevels$age_cat),
+    avg_base_iop_cat = factor(avg_iop, levels = fit$xlevels$avg_base_iop_cat),
+    avg_cct_cat = factor(avg_cct, levels = fit$xlevels$avg_cct_cat),
+    avg_base_vcdr_cat = factor(avg_vcdr, levels = fit$xlevels$avg_base_vcdr_cat),
+    avg_psd_cat = factor(avg_psd, levels = fit$xlevels$avg_psd_cat)
+  )
+  
+  pred <- survfit(fit, newdata = newdata)
+  surv_5yr <- summary(pred, times = 5)$surv
+  
+  list(
+    survfit = pred,
+    risk_5yr = 1 - surv_5yr,
+    newdata = newdata
+  )
+}
+
+# 4. Categorical (with genetics)
+risk_prediction_5yr_cat_gen <- function(fit, age, avg_iop, avg_cct, avg_vcdr, avg_psd,
+                                        TMCO1, CDKN2B.AS1, ADAMTS18.NUDT7, PLCE1, GABRG2) {
+  
+  newdata <- data.frame(
+    age_cat = factor(age, levels = fit$xlevels$age_cat),
+    avg_base_iop_cat = factor(avg_iop, levels = fit$xlevels$avg_base_iop_cat),
+    avg_cct_cat = factor(avg_cct, levels = fit$xlevels$avg_cct_cat),
+    avg_base_vcdr_cat = factor(avg_vcdr, levels = fit$xlevels$avg_base_vcdr_cat),
+    avg_psd_cat = factor(avg_psd, levels = fit$xlevels$avg_psd_cat),
+    TMCO1_cat = factor(TMCO1, levels = fit$xlevels$TMCO1_cat),
+    `CDKN2B-AS1_cat` = factor(CDKN2B.AS1, levels = fit$xlevels$`CDKN2B-AS1_cat`),
+    `ADAMTS18/NUDT7_cat` = factor(ADAMTS18.NUDT7, levels = fit$xlevels$`ADAMTS18/NUDT7_cat`),
+    PLCE1_cat = factor(PLCE1, levels = fit$xlevels$PLCE1_cat),
+    GABRG2_cat = factor(GABRG2, levels = fit$xlevels$GABRG2_cat),
+    check.names = FALSE
+  )
+  
+  pred <- survfit(fit, newdata = newdata)
+  surv_5yr <- summary(pred, times = 5)$surv
+  
+  list(
+    survfit = pred,
+    risk_5yr = 1 - surv_5yr,
+    newdata = newdata
+  )
+}
+
+# Helper: run the appropriate prediction function based on model_type
+compute_prediction <- function(input) {
+  if (input$model_type == "scaled") {
+    risk_prediction_5yr_scaled(
+      fit = fit_ph_scaled_con,
+      age = input$age,
+      avg_iop = input$iop,
+      avg_cct = input$cct,
+      avg_vcdr = input$vcdr,
+      avg_psd = input$psd
+    )
+  } else if (input$model_type == "scaled_gen") {
+    risk_prediction_5yr_scaled_gen(
+      fit = fit_ph_scaled_con_gen,
+      age = input$age,
+      avg_iop = input$iop,
+      avg_cct = input$cct,
+      avg_vcdr = input$vcdr,
+      avg_psd = input$psd,
+      TMCO1 = input$TMCO1,
+      CDKN2B.AS1 = input$CDKN2B,
+      ADAMTS18.NUDT7 = input$ADAMTS18,
+      PLCE1 = input$PLCE1,
+      GABRG2 = input$GABRG2
+    )
+  } else if (input$model_type == "cat") {
+    risk_prediction_5yr_cat(
+      fit = fit_ph_cat_con_label,
+      age = input$age_cat,
+      avg_iop = input$iop_cat,
+      avg_cct = input$cct_cat,
+      avg_vcdr = input$vcdr_cat,
+      avg_psd = input$psd_cat
+    )
+  } else if (input$model_type == "cat_gen") {
+    risk_prediction_5yr_cat_gen(
+      fit = fit_ph_cat_con_gen_label,
+      age = input$age_cat,
+      avg_iop = input$iop_cat,
+      avg_cct = input$cct_cat,
+      avg_vcdr = input$vcdr_cat,
+      avg_psd = input$psd_cat,
+      TMCO1 = input$TMCO1,
+      CDKN2B.AS1 = input$CDKN2B,
+      ADAMTS18.NUDT7 = input$ADAMTS18,
+      PLCE1 = input$PLCE1,
+      GABRG2 = input$GABRG2
+    )
+  }
+}
+
+# A label for the model, for titles
+model_label <- function(model_type) {
+  switch(
+    model_type,
+    "scaled"     = "Continuous clinical",
+    "scaled_gen" = "Continuous clinical + genetics",
+    "cat"        = "Categorical clinical",
+    "cat_gen"    = "Categorical clinical + genetics"
+  )
+}
+
+# ============================================================
+# UI: shinydashboard with calculator + model info
+# ============================================================
+
+library(fresh)
+
+
+ui <- dashboardPage(
+  dashboardHeader(title = "Glaucoma 5-Year Risk Calculator"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Risk Calculator", tabName = "calculator", icon = icon("calculator")),
+      menuItem("Model Documentation", tabName = "docs", icon = icon("book"))
+    )
+  ),
+  dashboardBody(
+    
+    
+    tags$head(
+      tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
+      
+      tags$style(HTML("
+      
+      /* SELECT INPUTS (dropdowns) */
+.selectize-control.single .selectize-input {
+  background-color: #C5A500 !important; /* gold background */
+  color: #000000 !important;            /* black text */
+  border: 1px solid #000000 !important;
+  font-weight: bold;
+}
+
+.selectize-control.single .selectize-input.focus {
+  background-color: #000000 !important; /* black when focused */
+  color: #C5A500 !important;            /* gold text */
+  border-color: #C5A500 !important;
+}
+
+.selectize-dropdown {
+  background-color: #C5A500 !important;
+  color: #000000 !important;
+  border: 1px solid #000000 !important;
+}
+
+.selectize-dropdown .active {
+  background-color: #000000 !important; /* black highlight */
+  color: #C5A500 !important;            /* gold text */
+}
+
+      
+      /* Make inputs and buttons more touch-friendly */
+input, select, button {
+  font-size: 16px !important;
+  padding: 10px !important;
+}
+
+    /* GLOBAL BACKGROUND + TEXT */
+   body, .content-wrapper, .right-side {
+  background-color: #FFFFFF !important; /* white */
+  color: #000000 !important;            /* black text */
+}
+
+
+    /* SIDEBAR */
+    .main-sidebar {
+      background-color: #C5A500 !important;
+    }
+    .sidebar-menu > li > a {
+      color: #000000 !important;
+      font-weight: bold;
+    }
+    .sidebar-menu > li.active > a,
+    .sidebar-menu > li:hover > a {
+      background-color: #000000 !important; /* black hover */
+      color: #C5A500 !important;            /* gold text */
+    }
+
+    /* HEADER */
+    .main-header .logo,
+    .main-header .navbar {
+      background-color: #C5A500 !important;
+      color: #000000 !important;
+      font-weight: bold;
+    }
+    .main-header .logo:hover {
+      background-color: #000000 !important;
+      color: #C5A500 !important;
+    }
+
+    /* BOXES */
+    .box {
+  background-color: #FFFFFF !important;
+  border: 1px solid #C5A500 !important;
+  color: #000000 !important;
+}
+
+    .box-header {
+      background-color: #000000 !important;
+      color: #C5A500 !important;
+      font-weight: bold;
+      border-bottom: 1px solid #C5A500 !important;
+    }
+
+    /* TABS */
+    .nav-tabs-custom > .nav-tabs > li.active > a {
+      background-color: #000000 !important;
+      color: #C5A500 !important;
+      font-weight: bold;
+    }
+    .nav-tabs-custom > .nav-tabs > li > a {
+      background-color: #C5A500 !important;
+      color: #000000 !important;
+    }
+
+    /* BUTTONS */
+    .btn-primary {
+      background-color: #000000 !important;
+      border-color: #000000 !important;
+      color: #C5A500 !important;
+      font-weight: bold;
+    }
+    .btn-primary:hover {
+      background-color: #333333 !important;
+      color: #C5A500 !important;
+    }
+
+    /* TABLES */
+    table {
+      background-color: #C5A500 !important;
+      color: #000000 !important;
+    }
+    th {
+      background-color: #000000 !important;
+      color: #C5A500 !important;
+    }
+
+    /* RISK TEXT HIGHLIGHT */
+    .risk-highlight {
+      background-color: #C5A500;
+      color: #000000;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-weight: bold;
+      display: inline-block;
+      box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+    }
+    
+   /* TEXT + NUMBER INPUTS */
+input[type='text'], input[type='number'] {
+  background-color: #C5A500 !important;
+  color: #000000 !important;
+  border: 1px solid #000000 !important;
+  font-weight: bold;
+}
+
+
+  "))
+    ),
+    
+
+    tabItems(
+      tabItem(
+        tabName = "calculator",
+        fluidRow(
+          box(
+            title = "Model selection & inputs", status = "primary", solidHeader = TRUE, width = 4,
+            
+            h4(strong("Select Model")),
+            selectInput(
+              "model_type",
+              "Clinical model type:",
+              choices = c(
+                "Continuous (no genetics)" = "scaled",
+                "Continuous (with genetics)" = "scaled_gen",
+                "Categorical (no genetics)" = "cat",
+                "Categorical (with genetics)" = "cat_gen"
+              )
+            ),
+            
+            hr(),
+            
+            conditionalPanel(
+              condition = "input.model_type == 'scaled' || input.model_type == 'scaled_gen'",
+              h4("Clinical (continuous)"),
+              numericInput("age", "Age (years)", 60, min = 20, max = 100),
+              numericInput("iop", "Mean intraocular pressure, mmHg(3 measurements per eye)", 20, min = 5, max = 40),
+              numericInput("cct", "Mean central corneal thickness, µm(3 measurements per eye)", 530, min = 400, max = 700),
+              numericInput("vcdr", "Mean vertical cup-to-disc ratio by contour(1 measurements per eye)", 0.6, min = 0.1, max = 1.0, step = 0.01),
+              numericInput("psd", "Mean humphrey pattern standard deviation, dB(2 measurements per eye)", 2.4, min = 0, max = 10)
+            ),
+            
+            conditionalPanel(
+              condition = "input.model_type == 'cat' || input.model_type == 'cat_gen'",
+              h4("Clinical (categorical)"),
+              selectInput("age_cat", "Age (years)", fit_ph_cat_con_label$xlevels$age_cat),
+              selectInput("iop_cat", "Mean IOP (mmHg)", fit_ph_cat_con_label$xlevels$avg_base_iop_cat),
+              selectInput("cct_cat", "Mean CCT (µm)", fit_ph_cat_con_label$xlevels$avg_cct_cat),
+              selectInput("vcdr_cat", "Mean VCDR (contour)", fit_ph_cat_con_label$xlevels$avg_base_vcdr_cat),
+              selectInput("psd_cat", "Mean PSD (dB)", fit_ph_cat_con_label$xlevels$avg_psd_cat)
+            ),
+            
+            conditionalPanel(
+              condition = "input.model_type == 'scaled_gen' || input.model_type == 'cat_gen'",
+              hr(),
+              h4("Genetic markers"),
+              selectInput("TMCO1", "TMCO1", fit_ph_cat_con_gen_label$xlevels$TMCO1_cat),
+              selectInput("CDKN2B", "CDKN2B-AS1", fit_ph_cat_con_gen_label$xlevels$`CDKN2B-AS1_cat`),
+              selectInput("ADAMTS18", "ADAMTS18/NUDT7", fit_ph_cat_con_gen_label$xlevels$`ADAMTS18/NUDT7_cat`),
+              selectInput("PLCE1", "PLCE1", fit_ph_cat_con_gen_label$xlevels$PLCE1_cat),
+              selectInput("GABRG2", "GABRG2", fit_ph_cat_con_gen_label$xlevels$GABRG2_cat)
+            ),
+            
+            hr(),
+            actionButton("compute", "Calculate 5-Year Risk", icon = icon("play"), class = "btn-primary btn-lg")
+          ),
+          
+          box(
+            title = "Estimated 5-Year Risk & Survival plot", status = "info", solidHeader = TRUE, width = 8,
+            h3("Estimated 5-Year Risk"),
+            h2(textOutput("risk_text"), style = "
+  background-color: #C5A500;
+  color: #000000;
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-weight: bold;
+  display: inline-block;
+  box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+")
+            ,
+            br(),
+            tabsetPanel(
+              tabPanel(
+                "Survival curve",
+                plotOutput("survival_plot", height = "auto")
+              ),
+              tabPanel(
+                "Download report",
+                br(),
+                p("Download a PDF report summarizing the patient-specific prediction and survival curve."),
+                downloadButton("download_report", "Download PDF report", icon = icon("file-pdf"))
+              ),
+              tabPanel(
+                "Model information",
+                br(),
+                textOutput("model_info_title"),
+                uiOutput("model_info_summary")
+              )
+            )
+          )
+        )
+      ),
+      
+      tabItem(
+        tabName = "docs",
+        fluidRow(
+          box(
+            title = "Model Documentation", status = "primary", solidHeader = TRUE, width = 12,
+            h3("About this calculator"),
+            p("This 5-Year Primary Open-Angle Glaucoma (POAG) Risk Calculator is based on observations from the ",
+              strong("Ocular Hypertension Treatment Study (OHTS)") ,
+              "based on Cox proportional hazards models. It estimates the 5-year risk that an individual with ocular hypertension will develop POAG."),
+            p("Predictions are most accurate for patients who are similar to those enrolled in the OHTS."),
+            p("You may choose a clinical-only model or include genetic markers (TMCO1, CDKN2B-AS1, ADAMTS18/NUDT7, PLCE1, GABRG2) if available."),
+            hr(),
+            h3("Model summaries"),
+            h4("Continuous clinical model"),
+            p("This model estimates the hazard ratio for each baseline variable, adjusted for all others."),
+            uiOutput("summary_scaled"),
+            h4("Continuous clinical + genetics"),
+            p("This model estimates the hazard ratio for each baseline variable, adjusted for all others."),
+            uiOutput("summary_scaled_gen"),
+            h4("Categorical clinical model"),
+            p("This model estimates the hazard ratio for each baseline variable, adjusted for all others."),
+            uiOutput("summary_cat"),
+            h4("Categorical clinical + genetics"),
+            p("This model estimates the hazard ratio for each baseline variable, adjusted for all others."),
+            uiOutput("summary_cat_gen")
+            
+          )
+        )
+      )
+    )
+  )
+)
+
+# ============================================================
+# SERVER
+# ============================================================
+
+server <- function(input, output, session) {
+  
+  current_pred <- reactiveVal(NULL)
+  
+  observeEvent(input$compute, {
+    pred <- compute_prediction(input)
+    current_pred(pred)
+  })
+  
+  # Risk text
+  output$risk_text <- renderText({
+    pred <- current_pred()
+    if (is.null(pred)) return("Please fill out fields and click on calculate")
+    paste0(round(pred$risk_5yr * 100, 2), "%")
+  })
+  
+  # Survival curve plot
+  output$survival_plot <- renderPlot({
+    pred <- current_pred()
+    if (is.null(pred)) return(NULL)
+    
+    s <- pred$survfit
+    df <- data.frame(
+      time = s$time,
+      surv = s$surv,
+      lower = if (!is.null(s$lower)) s$lower else NA,
+      upper = if (!is.null(s$upper)) s$upper else NA
+    )
+    
+    ggplot(df, aes(x = time, y = surv)) +
+      geom_step(color = "#000000", linewidth = 1.2) +  # black survival line
+      geom_step(aes(y = lower), linetype = "dashed", color = "#333333") +
+      geom_step(aes(y = upper), linetype = "dashed", color = "#333333") +
+      geom_vline(xintercept = 5, linetype = "dashed", color = "#C5A500", linewidth = 1) +  # gold vertical line
+      labs(
+        x = "Years",
+        y = "Survival probability (no POAG)",
+        title = paste0("Survival curve — ", model_label(input$model_type))
+      ) +
+      ylim(0, 1) +
+      theme_minimal(base_size = 14) +
+      theme(
+        plot.background = element_rect(fill = "#C5A500", color = NA),
+        panel.background = element_rect(fill = "#FFFFFF", color = NA),
+        text = element_text(color = "#000000"),
+        axis.text = element_text(color = "#000000"),
+        axis.title = element_text(color = "#000000"),
+        plot.title = element_text(face = "bold", hjust = 0.5)
+      )
+  },
+  height = function() { session$clientData$output_survival_plot_width * 0.75 # 4:3 ratio 
+    }
+  
+  )
+  
+  # Model info tab for the current model
+  output$model_info_title <- renderText({
+    paste("Current model:", model_label(input$model_type))
+  })
+  
+  output$model_info_summary <- renderUI({
+    div(style = "overflow-x: auto;",
+    if (input$model_type == "scaled")     hr_table_con %>%
+      knitr::kable(format = "html", caption = "Continuous Clinical Model") %>%
+      kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      ) %>%
+      HTML()  #   summary(fit_ph_scaled_con)
+    else if (input$model_type == "scaled_gen") hr_table_con_gen %>%
+      knitr::kable(format = "html", caption = "Continuous Clinical Model") %>%
+      kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      ) %>%
+      HTML()  #summary(fit_ph_scaled_con_gen)
+    else if (input$model_type == "cat")      hr_table_cat_con %>%
+      knitr::kable(format = "html", caption = "Continuous Clinical Model") %>%
+      kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      ) %>%
+      HTML()  # summary(fit_ph_cat_con_label)
+    else if (input$model_type == "cat_gen")   hr_table_cat_con_gen %>%
+      knitr::kable(format = "html", caption = "Continuous Clinical Model") %>%
+      kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      ) %>%
+      HTML()  #summary(fit_ph_cat_con_gen_label)
+    )
+    
+  })
+  
+  # Documentation tab summaries
+  
+ # output$summary_scaled     <- renderPrint(hr_table_con)
+  output$summary_scaled <- renderUI({ 
+   
+     div(style = "overflow-x: auto;",
+    hr_table_con %>%
+      knitr::kable(format = "html", caption = "Continuous Clinical Model") %>%
+      kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      ) %>%
+      HTML()
+  )
+  })
+  #output$summary_scaled_gen <- renderPrint(hr_table_con_gen)
+  output$summary_scaled_gen <- renderUI({
+    div(style = "overflow-x: auto;",
+    hr_table_con_gen %>%
+      knitr::kable(format = "html", caption = "Continuous Clinical Model") %>%
+      kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      ) %>%
+      HTML()
+    )
+  })
+  #output$summary_cat        <- renderPrint(hr_table_cat_con)
+  output$summary_cat <- renderUI({
+    div(style = "overflow-x: auto;",
+    hr_table_cat_con %>%
+      knitr::kable(format = "html", caption = "Continuous Clinical Model") %>%
+      kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      ) %>%
+      HTML()
+    )
+  })
+  #output$summary_cat_gen    <- renderPrint(hr_table_cat_con_gen)
+  output$summary_cat_gen <- renderUI({
+    div(style = "overflow-x: auto;",
+    hr_table_cat_con_gen %>%
+      knitr::kable(format = "html", caption = "Continuous Clinical Model") %>%
+      kableExtra::kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      ) %>%
+      HTML()
+    )
+  })
+  
+  # PDF report
+  output$download_report <- downloadHandler(
+    filename = function() {
+      paste0("glaucoma_risk_report_", Sys.Date(), ".pdf")
+    },
+    content = function(file) {
+      params <- list(
+        model_type = input$model_type,
+        model_label = model_label(input$model_type),
+        pred = current_pred()
+      )
+      rmarkdown::render(
+        input = "report.Rmd",
+        output_file = file,
+        params = params,
+        envir = new.env(parent = globalenv())
+      )
+    }
+  )
+}
+
+shinyApp(ui, server)

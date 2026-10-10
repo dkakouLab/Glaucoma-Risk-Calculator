@@ -1,0 +1,1703 @@
+---
+title: "OHTS Risk Calculation"
+author: "DIK"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    keep_tex: yes
+    fig_caption: yes
+    latex_engine: xelatex
+header-includes:
+- \usepackage{hyperref}
+- \usepackage{array}
+- \usepackage{caption}
+- \usepackage{graphicx}
+- \usepackage{siunitx}
+- \usepackage{multirow}
+- \usepackage{hhline}
+- \usepackage{calc}
+- \usepackage{tabularx}
+- \usepackage{fontawesome}
+- \usepackage[para,online,flushleft]{threeparttable}
+biblio-style: apsr
+geometry: margin=1in
+fontfamily: libertine
+fontsize: 11pt
+endnote: no
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width = 7, fig.height = 5, fig.align = 'center',
+                      echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(survival)
+library(survminer)
+library(dplyr)
+library(magrittr)
+library(knitr)
+library(flextable)
+#library(BiocManager)
+#BiocManager::install("snpStats")
+
+library(snpStats)
+# library(kableExtra)
+library(MachineShop)
+
+```
+
+
+```{r}
+# Reading data
+
+ohts_data_path <- "C:/Users/dkakou/OneDrive - University of Iowa/Genetic Risk Factors in the OHTS R01EY035266 - OHTS Data/"
+
+# First data from Liu
+raw = read.csv(paste0(ohts_data_path,"WashU_data_Lei_Liu/leibaseanypoag_deid.csv"))
+raw$followup = with(raw, ifelse(right > 1000, left, (left + right)/2))
+
+# Second data from Todd
+#raw2 = read.delim(paste0(ohts_data_path,
+#                        "Data_from_Todd_March_27_2024/ohtspoagsupdated_07142020.txt"))
+#mydata = merge(raw, raw2, by = "ran_id")
+
+# Covariates data
+covar = read.delim(paste0(ohts_data_path,"OHTSdataset.covariates_and_PCA"))  
+vfqa2_data = read.delim(paste0(ohts_data_path,
+                                "vfqa2.tsv.for_kai"))
+covar_with_psd = merge(covar, vfqa2_data, by.x = "FID", by.y = "ran_id")
+
+merge_data = merge(raw, covar_with_psd, by.x="ran_id", by.y="FID")
+
+## Add genotype data
+geno = read.plink(paste0(ohts_data_path,"for_kai/for_kai"), select.snps = NULL)
+temp = as(geno$genotypes, class("numeric"))
+ttt = rownames(temp)
+temp = as.data.frame(temp)
+temp$ran_id = rownames(temp)
+final_merge = merge(merge_data, temp)
+
+
+# chr position to rs conversion: https://www.ncbi.nlm.nih.gov/snp/ 
+names(final_merge)[58:74] = c("rs1192415", "rs2790053", "rs1286770", "rs1500708",
+                        "rs56233426", "rs72904286", "rs2811688", "rs4612174",
+                        "rs2191828", "rs2515437", "rs944801", "rs2637250",
+                        "rs72837408", "rs2218471", "rs6124885", "rs66819623", 
+                        "rs12013156")
+ttt = read.table(paste0(ohts_data_path, "for_kai/forKai_chr5SNP.ped"))
+ttt$rs1484360 = paste(ttt$V7, ttt$V8, sep="/")
+ttt$ran_id = ttt$V1
+final_merge = merge(final_merge, ttt, by="ran_id")
+
+ttt = read.table(paste0(ohts_data_path,"ADAMTS_NUDT7.ped"))
+ttt$rs4887911 = paste(ttt$V7, ttt$V8, sep="/")
+ttt$rs280875 = paste(ttt$V9, ttt$V10, sep="/")
+ttt$ran_id = ttt$V1
+final_merge = merge(final_merge, ttt, by="ran_id")
+
+kai2 = read.plink(paste0(ohts_data_path,"kai2/for_kai_PLCE1"), select.snps = NULL)
+temp = as(kai2$genotypes, class("numeric"))
+ttt = rownames(temp)
+temp = as.data.frame(temp)
+temp$ran_id = rownames(temp)
+final_merge = merge(final_merge, temp)
+Black = read.table(paste0(ohts_data_path, "kai2/for_kai_PLCE1_blackOnly.fam"))[,1]
+final_merge$black = ifelse(final_merge$ran_id %in% Black, 1, 0)
+
+## Genes used in coxph model
+final_merge$`ADAMTS18/NUDT7` = rep(0, nrow(final_merge))
+final_merge$`ADAMTS18/NUDT7`[final_merge$rs4887911 == "T/C"] = 1
+final_merge$`ADAMTS18/NUDT7`[final_merge$rs4887911 == "C/C"] = 2
+
+final_merge$GABRG2 = rep(0, nrow(final_merge))
+final_merge$GABRG2[final_merge$rs1484360 == "T/G"] = 1
+final_merge$GABRG2[final_merge$rs1484360 == "T/T"] = 2
+
+final_merge$TMCO1 = rep(0, nrow(final_merge))
+final_merge$TMCO1[final_merge$rs2790053 == "A/B"] = 1
+final_merge$TMCO1[final_merge$rs2790053 == "A/A"] = 2
+
+final_merge$`CDKN2B-AS1` = rep(0, nrow(final_merge))
+final_merge$`CDKN2B-AS1`[final_merge$rs944801 == "A/B"] = 1
+final_merge$`CDKN2B-AS1`[final_merge$rs944801 == "B/B"] = 2
+
+final_merge$PLCE1 = rep(0, nrow(final_merge))
+final_merge$PLCE1[final_merge$`10:95991336:T:C` == "A/B"] = 1
+final_merge$PLCE1[final_merge$`10:95991336:T:C` == "A/A"] = 2
+
+
+  
+final_data_all = final_merge %>% 
+  mutate(
+    age_cat = cut(age.x,
+                  breaks = c(-Inf, 45, 55, 65, 75, Inf),
+                  labels = 0:4,
+                  right = FALSE
+                 ),
+    avg_base_iop_cat = cut(avg_base_iop,
+                  breaks = c(-Inf, 22, 24, 26, 28, Inf),
+                  labels = 0:4,
+                  right = FALSE),
+    avg_cct_cat =relevel(cut(avg_cct,
+                     breaks = c(-Inf, 525, 550, 575, 600, Inf),
+                     labels = 4:0,
+                     right = TRUE),
+                     ref = "0"),
+    avg_base_vcdr_cat = cut(avg_base_vcdr,
+                   breaks = c(-Inf, 0.3, 0.4, 0.5, 0.6, Inf),
+                   labels = 0:4,
+                   right = FALSE),
+    avg_psd_cat = cut(AVG_PSD,
+                   breaks = c(-Inf, 1.8, 2.0, 2.4,  Inf),
+                   labels = 0:3,
+                   right = FALSE)) %>% 
+      mutate(
+         `ADAMTS18/NUDT7_cat` = factor(case_when(
+           `ADAMTS18/NUDT7` == 0 ~ "T/T",
+           `ADAMTS18/NUDT7` == 1 ~ "T/C",
+           `ADAMTS18/NUDT7` == 2 ~ "C/C")),
+         GABRG2_cat = factor( case_when(
+           GABRG2 == 0 ~ "G/G",
+           GABRG2 == 1 ~ "T/G",
+           GABRG2 == 2 ~ "T/T")),
+         TMCO1_cat =factor( case_when(
+           TMCO1 == 0 ~ "B/B",
+           TMCO1 == 1 ~ "A/B",
+           TMCO1 == 2 ~ "A/A" )),
+         `CDKN2B-AS1_cat`= factor(case_when(
+           `CDKN2B-AS1`== 0 ~ "A/A",
+           `CDKN2B-AS1`== 1 ~ "A/B",
+           `CDKN2B-AS1`== 2 ~ "B/B")),
+         PLCE1_cat = factor(case_when(
+           PLCE1 == 0 ~ "B/B",
+           PLCE1 == 1 ~ "A/B",
+           PLCE1 == 2 ~ "A/A") )
+    
+    
+  ) %>% 
+  dplyr:: select(ran_id,followup, poag, age.x, age_cat, gender,avg_base_iop,
+         ,avg_base_iop_cat, avg_cct, avg_cct_cat,avg_base_vcdr,
+         avg_base_vcdr_cat, AVG_PSD, avg_psd_cat, TMCO1 , TMCO1_cat, `CDKN2B-AS1` , `CDKN2B-AS1_cat`,
+         `ADAMTS18/NUDT7`, `ADAMTS18/NUDT7_cat`, PLCE1 ,PLCE1_cat, GABRG2, GABRG2_cat, Treated) 
+
+
+
+
+```
+\newpage
+
+
+# Descrpitive Statistics Based on all patients
+
+\normalsize
+\footnotesize
+```{r}
+library(table1)
+
+label(final_data_all$age.x) <- "Age"
+label(final_data_all$gender) <- "Gender"
+label(final_data_all$avg_base_iop) <- "Mean IOP"
+label(final_data_all$avg_cct) <- "Mean CCT"
+label(final_data_all$avg_base_vcdr) <- "Mean Vertical C/D ratio"
+label(final_data_all$AVG_PSD) <- "Mean Pattern Standard Deviation"
+label(final_data_all$followup) <- "Follow up"
+units(final_data_all$age.x) <- "years"
+units(final_data_all$followup) <- "years"
+label(final_data_all$TMCO1_cat) <- "TMCO1"
+label(final_data_all$`CDKN2B-AS1_cat`) <- "CDKN2B-AS1"
+label(final_data_all$`ADAMTS18/NUDT7_cat`) <- "ADAMTS18/NUDT7"
+label(final_data_all$PLCE1_cat)<- "PLCE1"
+label(final_data_all$GABRG2_cat) <- "GABRG2"
+
+table1(~ age.x + gender + avg_base_iop + avg_cct + avg_base_vcdr + AVG_PSD + followup +
+         TMCO1_cat + `CDKN2B-AS1_cat` + `ADAMTS18/NUDT7_cat`+ PLCE1_cat + GABRG2_cat| poag,
+       data = final_data_all %>% mutate(
+         poag = ifelse(poag == 1, "Yes","No"),
+         gender = ifelse(gender==1, "Male", "Female") ), 
+       caption = "Desciptive Statistics by Poag Status"  )
+
+
+```
+
+
+
+# Continuous case : Ajusting Covariates based on OHTS Validated Prediction Study
+## Fitting cox model without genetics variables using all patients
+\footnotesize
+```{r}
+
+final_data_adjusted <- final_data_all %>%
+  mutate(
+    age_decade = age.x / 10,                     # per 10 years
+    avg_cct_per40_thinner = avg_cct / 40, # positive => thinner than mean; per 40 um
+    avg_base_vcdr_per01 = avg_base_vcdr / 0.1,            # per 0.1 larger (multiply by 10)
+    avg_psd_per02 = AVG_PSD  / 0.2     # per 0.2 dB greater (multiply by 5)
+  )
+
+
+# --- fit Cox model with scaled continuous predictors ------------------------
+fit_ph_scaled <- coxph(Surv(followup, poag == 1) ~
+                       age_decade + avg_base_iop + avg_cct_per40_thinner +
+                       avg_base_vcdr_per01 + avg_psd_per02,
+                     data = final_data_adjusted, x = TRUE)
+
+hr_table <- broom::tidy(fit_ph_scaled, exponentiate = FALSE, conf.int = TRUE) %>%
+  dplyr::select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate(
+    # Replace HR and CIs with exp(coef)
+    HR = exp(estimate),
+    `95% Lower CI` = exp(conf.low),
+    `95% Upper CI` = exp(conf.high),
+    
+    # Reverse interpretation for avg_cct_per40_thinner
+    HR = ifelse(term == "avg_cct_per40_thinner", exp(-estimate), HR),
+    `95% Lower CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.high), `95% Lower CI`),
+    `95% Upper CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.low), `95% Upper CI`),
+    
+    n = fit_ph_scaled$n,
+    `No. of events` = fit_ph_scaled$nevent) %>% 
+    select(-estimate, -conf.low, -conf.high) %>% 
+  rename(`Baseline Variable` = term, `P Value` = p.value) %>%
+  relocate(c(n, `No. of events`), .after = `Baseline Variable`) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 5))) %>% relocate(`P Value`, .after = `95% Upper CI` )
+
+
+#knitr::kable(hr_table)
+#flextable( hr_table) %>% set_caption("Final Multivariate Model using all patients")
+kable(hr_table, caption ="Final Multivariate Model using all patients with genetics variables" ) 
+```
+
+
+## Fitting cox model with genetics variables using all patients
+\footnotesize
+```{r}
+# --- fit Cox model with scaled continuous predictors ------------------------
+fit_ph_scaled_gen <- coxph(Surv(followup, poag == 1) ~
+                       age_decade + avg_base_iop + avg_cct_per40_thinner +
+                       avg_base_vcdr_per01 + avg_psd_per02 +
+                           TMCO1_cat + `CDKN2B-AS1_cat` + `ADAMTS18/NUDT7_cat`+
+                         PLCE1_cat + GABRG2_cat,
+                     data = final_data_adjusted, x = TRUE)
+
+hr_table_gen <- broom::tidy(fit_ph_scaled_gen, exponentiate = FALSE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate(
+    # Replace HR and CIs with exp(coef)
+    HR = exp(estimate),
+    `95% Lower CI` = exp(conf.low),
+    `95% Upper CI` = exp(conf.high),
+    
+    # Reverse interpretation for avg_cct_per40_thinner
+    HR = ifelse(term == "avg_cct_per40_thinner", exp(-estimate), HR),
+    `95% Lower CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.high), `95% Lower CI`),
+    `95% Upper CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.low), `95% Upper CI`),
+    
+    n = fit_ph_scaled_gen$n,
+    `No. of events` = fit_ph_scaled_gen$nevent) %>% 
+    select(-estimate, -conf.low, -conf.high) %>% 
+  rename(`Baseline Variable` = term, `P Value` = p.value) %>%
+  relocate(c(n, `No. of events`), .after = `Baseline Variable`) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 5))) %>% relocate(`P Value`, .after = `95% Upper CI` )
+
+
+
+#knitr::kable(hr_table_gen)
+# library(flextable)
+# flextable( hr_table_gen) %>% set_caption("Final Multivariate Model using all patients")
+kable(hr_table_gen, caption ="Final Multivariate Model  with genetics variables using all patients" )
+
+```
+
+
+## Fitting cox model without genetics variables using only control patients
+\footnotesize
+```{r}
+final_data_adj_control = final_data_adjusted %>% filter(Treated==1)  ## 1 is for No Treatment
+
+# --- fit Cox model with scaled continuous predictors ------------------------
+fit_ph_scaled_con <- coxph(Surv(followup, poag == 1) ~
+                       age_decade + avg_base_iop + avg_cct_per40_thinner +
+                       avg_base_vcdr_per01 + avg_psd_per02,
+                     data = final_data_adj_control, x = TRUE)
+
+hr_table_con <- broom::tidy(fit_ph_scaled_con, exponentiate = FALSE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate(
+    # Replace HR and CIs with exp(coef)
+    HR = exp(estimate),
+    `95% Lower CI` = exp(conf.low),
+    `95% Upper CI` = exp(conf.high),
+    
+    # Reverse interpretation for avg_cct_per40_thinner
+    HR = ifelse(term == "avg_cct_per40_thinner", exp(-estimate), HR),
+    `95% Lower CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.high), `95% Lower CI`),
+    `95% Upper CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.low), `95% Upper CI`),
+    
+    n = fit_ph_scaled_con$n,
+    `No. of events` = fit_ph_scaled_con$nevent) %>% 
+    select(-estimate, -conf.low, -conf.high) %>% 
+  rename(`Baseline Variable` = term, `P Value` = p.value) %>%
+  relocate(c(n, `No. of events`), .after = `Baseline Variable`) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 5))) %>% relocate(`P Value`, .after = `95% Upper CI` )
+
+
+#knitr::kable(hr_table)
+#flextable( hr_table_con) %>% set_caption("Final Multivariate Model using only control patients")
+kable(hr_table_con, caption = "Final Multivariate Model using only control patients")
+```
+
+## Machineshop Version
+```{r}
+set.seed(123)
+train_inds <- sample(nrow(final_data_adj_control), 2 / 3 * nrow(final_data_adj_control))
+trainset <- final_data_adj_control[train_inds, ]
+testset <- final_data_adj_control[-train_inds, ]
+
+
+Cox_fit <- fit(
+  Surv(followup, poag == 1) ~
+                       age_decade + avg_base_iop + avg_cct_per40_thinner +
+                       avg_base_vcdr_per01 + avg_psd_per02,
+  data = train_data,
+  model = CoxModel
+)
+summary(Cox_fit)
+
+
+Cox_fit_gen <- fit(
+  Surv(followup, poag == 1) ~
+                       age_decade + avg_base_iop + avg_cct_per40_thinner +
+                       avg_base_vcdr_per01 + avg_psd_per02 +
+                         TMCO1_cat + `CDKN2B-AS1_cat` + `ADAMTS18/NUDT7_cat`+
+                         PLCE1_cat + GABRG2_cat,
+  data = train_data,
+  model = CoxModel
+)
+summary(Cox_fit_gen)
+
+```
+
+
+## Resampling
+* Setting the control seed helps to ensure reproducible results - same sampling of training and test sets.
+
+```{r}
+#| label: rsample
+
+(control <- CVControl(folds = 10, seed = 2026))
+(res <- resample(
+  Surv(followup, poag == 1) ~
+                       age_decade + avg_base_iop + avg_cct_per40_thinner +
+                       avg_base_vcdr_per01 + avg_psd_per02, data = final_data_adj_control, model = CoxModel,
+  control = control
+))
+
+(res_gen <- resample(
+  Surv(followup, poag == 1) ~
+                       age_decade + avg_base_iop + avg_cct_per40_thinner +
+                       avg_base_vcdr_per01 + avg_psd_per02 +
+                         TMCO1_cat + `CDKN2B-AS1_cat` + `ADAMTS18/NUDT7_cat`+
+                         PLCE1_cat + GABRG2_cat, data = final_data_adj_control, model = CoxModel,
+  control = control
+))
+```
+```{r}
+print(res)
+print(res, level = -1)
+print(res, level = 1)
+```
+
+
+
+```{r}
+summary(res)
+summary(res_gen)
+
+stats <- c(
+  Median = median,
+  Quantile = function(x) quantile(x, c(0.25, 0.75)),
+  SE = function(x) sd(x) / length(x)
+)
+summary(res, stats = stats)
+summary(res_gen, stats = stats)
+
+perf <- performance(res, metrics = c("C-Index" = cindex, "MSE" = mse, "R2" = r2))
+perf_gen <- performance(res_gen, metrics = c("C-Index" = cindex, "MSE" = mse, "R2" = r2))
+
+summary(perf, stats = stats)
+summary(perf_gen, stats = stats)
+
+```
+
+
+# Predictive Performance
+
+## Clinical predictors only model
+```{r}
+#| label: test_perf
+
+obs_test <- response(Cox_fit, newdata = test_data)
+pred_test2 <- predict(Cox_fit, newdata = test_data, distr = "empirical")
+performance(obs_test, pred_test2)
+## Times at which to predict survival events or probabilities
+times <- 5
+
+## Predicted time-specific survival probabilities
+pred_test_events <- predict(Cox_fit, newdata = test_data,distr= "empirical",  times = times)
+performance(obs_test, pred_test_events) #, metrics = metricinfo(obs_test, pred_test_events) %>% names)
+
+## Predicted time-specific survival probabilities
+pred_test_probs <- predict(Cox_fit, newdata = test_data, distr= "empirical",  times = times, type = "raw")
+performance(obs_test, pred_test_probs)#, metrics = metricinfo(obs_test, pred_test_probs) %>% names)
+```
+
+## Clinical and genetic predictors
+```{r}
+#| label: test_perf_gen
+
+obs_test_gen <- response(Cox_fit_gen, newdata = test_data)
+pred_test2_gen <- predict(Cox_fit_gen, newdata = test_data, distr = "empirical")
+performance(obs_test, pred_test2_gen)
+## Times at which to predict survival events or probabilities
+times <- 5
+
+## Predicted time-specific survival probabilities
+pred_test_events_gen <- predict(Cox_fit_gen, newdata = test_data,distr= "empirical", times = times)
+performance(obs_test_gen, pred_test_events_gen)
+
+## Predicted time-specific survival probabilities
+pred_test_probs_gen <- predict(Cox_fit_gen, newdata = test_data, times = times, type = "prob")
+performance(obs_test_gen, pred_test_probs_gen) #, metrics = metricinfo(obs_test_gen, pred_test_probs_gen) %>% names)
+
+```
+
+## Metrics
+
+```{r}
+## Predicted survival metrics
+
+### Survival means
+metricinfo(obs_test, pred_test) %>% names
+metricinfo(obs_test_gen, pred_test_gen) %>% names
+
+### Survival events
+metricinfo(obs_test, pred_test_events) %>% names
+
+### Survival probabilities
+metricinfo(obs_test, pred_test_probs) %>% names
+```
+
+
+## Confusion Matrices
+
+```{r}
+#| label: confusion
+
+(conf <- confusion(obs_test, pred_test_probs))
+ plot(conf)
+ summary(conf)
+ 
+ (conf_gen <- confusion(obs_test_gen, pred_test_probs_gen))
+ plot(conf_gen)
+ summary(conf_gen)
+ 
+ 
+ 
+```
+## Performance Curves
+
+### ROC Curves
+
+```{r}
+#| label: roc
+
+## ROC curve
+roc <- performance_curve(obs_test, pred_test_probs)
+roc_gen <- performance_curve(obs_test_gen, pred_test_probs_gen)
+
+plot(roc, diagonal = TRUE)
+plot(roc_gen, add=TRUE, diagonal = TRUE)
+```
+
+```{r}
+#| label: roc_cutoffs
+
+plot(roc, type = "cutoffs")
+
+plot(roc_gen, type = "cutoffs")
+
+
+```
+
+```{r}
+#| label: roc_auc
+
+## Area under the ROC curve
+auc(roc)
+
+auc(roc_gen)
+```
+### Precision Recall Curves
+
+```{r}
+#| label: pr
+
+## Precision-recall curve
+pr <- performance_curve(
+  obs_test, pred_test_probs,
+  metrics = c(precision, recall)
+)
+plot(pr)
+```
+
+### Lift Curves
+
+```{r}
+#| label: lift
+
+## Lift curves
+lf <- lift(obs_test, pred_test_probs)
+plot(lf, find = 0.75)
+```
+
+
+## Fitting cox model with genetics variables using only control patients
+\footnotesize
+```{r}
+fit_ph_scaled_con_gen <- coxph(Surv(followup, poag == 1) ~
+                       age_decade + avg_base_iop + avg_cct_per40_thinner +
+                       avg_base_vcdr_per01 + avg_psd_per02 +
+                         TMCO1_cat + `CDKN2B-AS1_cat`  + `ADAMTS18/NUDT7_cat` +
+                         PLCE1_cat + GABRG2_cat,
+                     data = final_data_adj_control, x = TRUE)
+
+
+hr_table_con_gen <- broom::tidy(fit_ph_scaled_con_gen, exponentiate = FALSE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate(
+    # Replace HR and CIs with exp(coef)
+    HR = exp(estimate),
+    `95% Lower CI` = exp(conf.low),
+    `95% Upper CI` = exp(conf.high),
+    
+    # Reverse interpretation for avg_cct_per40_thinner
+    HR = ifelse(term == "avg_cct_per40_thinner", exp(-estimate), HR),
+    `95% Lower CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.high), `95% Lower CI`),
+    `95% Upper CI` = ifelse(term == "avg_cct_per40_thinner", exp(-conf.low), `95% Upper CI`),
+    
+    n = fit_ph_scaled_con_gen$n,
+    `No. of events` = fit_ph_scaled_con_gen$nevent) %>% 
+    select(-estimate, -conf.low, -conf.high) %>% 
+  rename(`Baseline Variable` = term, `P Value` = p.value) %>%
+  relocate(c(n, `No. of events`), .after = `Baseline Variable`) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 5))) %>% relocate(`P Value`, .after = `95% Upper CI` )
+
+kable(hr_table_con_gen, caption = "Final Multivariate Model with genetic variables using only control patients")
+#flextable( hr_table_con_gen) %>% set_caption("Final Multivariate Model using only control patients")
+
+```
+
+
+## Risk Calculator for prediction example
+
+### Using continuous-based model without genetic variables with all patients vs control patients
+```{r, eval=FALSE}
+base.surv_scaled <- survfit(fit_ph_scaled, newdata = data.frame(
+  age_decade = 0, # age_decade,
+  avg_base_iop = 0, #avg_base_iop ,
+  avg_cct_per40_thinner = 0, # avg_cct_per40_thinner,
+  avg_base_vcdr_per01 =0, # avg_base_vcdr_per01,
+  avg_psd_per02 =0 # avg_psd_per02
+))
+
+
+new_values_list <- list(
+  age = 60,            # years
+  avg_iop = 20,        # mmHg
+  avg_cct = 530,       # \mu m
+  avg_vcdr = 0.6,      # C/D ratio
+  avg_psd = 2.4        # dB
+)
+
+predict_risk_5yr_scaled <- function(fit, new_values_list,
+                                    t_years = "5 years") {
+
+  
+  
+  base.surv_scaled <- survfit(fit, newdata = data.frame(
+  age_decade = 0, # age_decade,
+  avg_base_iop = 0, #avg_base_iop ,
+  avg_cct_per40_thinner = 0, # avg_cct_per40_thinner,
+  avg_base_vcdr_per01 =0, # avg_base_vcdr_per01,
+  avg_psd_per02 =0 # avg_psd_per02
+))
+  summ_base = summary(base.surv_scaled)
+  S0_t = summ_base$surv[which(abs(summ_base$time -4.985626)< 1e-5)]
+  
+  
+  scaled_values = list(
+    age_decade    = new_values_list$age / 10,          # per decade
+    avg_base_iop        = new_values_list$avg_iop,           # per mmHg (no centering)
+    avg_cct_per40_thinner   =  new_values_list$avg_cct / 40,      # per 40 µm thinner
+    avg_base_vcdr_per01  = new_values_list$avg_vcdr / 0.1,                # per 0.1 larger
+    avg_psd_per02      = new_values_list$avg_psd / 0.2                  # per 0.2 dB greater
+  )
+  
+  covariates <- names(coef(fit))
+  # Compute linear predictor for new subject
+  PI <- sum(coef(fit)[covariates] * unlist(scaled_values[covariates]))
+  
+  # Compute risk = 1 - S0(t) ^ exp(PI)
+  risk <- 1-  S0_t ^ exp(PI)
+  
+  return(data.frame(
+    time_point = t_years,
+    PI = PI,
+    risk_5yr = risk
+  ))
+}
+
+
+
+example_values <- list(
+  age = 60,            # years
+  avg_iop = 20,        # mmHg
+  avg_cct = 530,       # µm
+  avg_vcdr = 0.6,      # C/D ratio
+  avg_psd = 2.4        # dB
+)
+
+test = rbind(predict_risk_5yr_scaled(fit_ph_scaled, new_values_list = example_values),
+             predict_risk_5yr_scaled(fit_ph_scaled_con, new_values_list = example_values)) %>% 
+  mutate(Model = c("With all patients", "With Control patients")) %>% relocate(Model)
+
+#test %>% flextable() %>% set_caption("5 year Risk estimate example for a patient ")
+
+kable(test %>% mutate(across(where(is.numeric), ~ round(.x, 4))),
+      caption = "5 year Risk estimate example for a patient" )
+```
+
+\footnotesize
+```{r}
+## Risk Prediction Different method
+
+risk_prediction_5yr_scaled = function(fit,
+                           age = 60, avg_iop = 20, avg_cct = 530, avg_vcdr =0.6, avg_psd=2.4){
+  
+   newdata = data.frame(
+  age_decade =  age/10,
+  avg_base_iop = avg_iop ,
+  avg_cct_per40_thinner = avg_cct / 40,
+  avg_base_vcdr_per01 = avg_vcdr / 0.1,
+  avg_psd_per02 = avg_psd / 0.2
+)
+   
+  pred.surv_scaled <- survfit(fit, newdata=newdata)
+  
+  
+  surv_5yr =   summary( pred.surv_scaled, times = 5)$surv
+  risk_5yr = 1 - surv_5yr
+  
+  PI <- predict(fit, newdata = newdata, type = "lp")
+
+  return(data.frame(
+    time_point = "5 years",
+    PI = PI,
+    risk_5yr = risk_5yr
+  ))
+  
+}
+
+test = rbind(risk_prediction_5yr_scaled(fit_ph_scaled),
+             risk_prediction_5yr_scaled(fit_ph_scaled_con), make.row.names =FALSE) %>% 
+  mutate(Model = c("With all patients", "With Control patients")) %>% relocate(Model)
+#test %>% flextable() %>% set_caption("5 year Risk estimate example for a patient ") %>% autofit()
+test %>% mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  kable( caption = "5 year risk estimate example for a patient using model without genetic variables")
+```
+
+### Using continuous-based model with genetic variables with all patients vs control patients
+\footnotesize
+```{r}
+risk_prediction_5yr_scaled_gen = function(fit,
+                           age = 60, avg_iop = 20, avg_cct = 530, avg_vcdr =0.6, avg_psd=2.4,
+                           TMCO1= "A/A" , CDKN2B.AS1 ="A/A", ADAMTS18.NUDT7= "C/C", PLCE1 ="A/A", GABRG2="G/G"){
+  
+  
+  newdata = data.frame(
+  age_decade =  age/10,
+  avg_base_iop = avg_iop ,
+  avg_cct_per40_thinner = avg_cct / 40,
+  avg_base_vcdr_per01 = avg_vcdr / 0.1,
+  avg_psd_per02 = avg_psd / 0.2,
+  TMCO1_cat = factor(TMCO1, levels = c( "A/A", "A/B", "B/B")),
+    `CDKN2B-AS1_cat` = factor(CDKN2B.AS1, levels = c( "A/A", "A/B", "B/B")),
+    `ADAMTS18/NUDT7_cat` =factor(ADAMTS18.NUDT7, levels = c("C/C", "T/C", "T/T")),
+    PLCE1_cat =factor(PLCE1, levels = c( "A/A", "A/B", "B/B")),
+    GABRG2_cat =factor(GABRG2, levels = c( "G/G", "T/G", "T/T")), check.names = FALSE
+)
+   
+  pred.surv_scaled <- survfit(fit,newdata=newdata)
+  
+  surv_5yr =   summary( pred.surv_scaled, times = 5)$surv
+  risk_5yr = 1 - surv_5yr
+  
+  PI <- predict(fit, newdata = newdata, type = "lp")
+
+  
+  
+  return(data.frame(
+    time_point = "5 years",
+    PI = PI,
+    risk_5yr = risk_5yr
+  ))
+}
+
+test = rbind(risk_prediction_5yr_scaled_gen(fit_ph_scaled_gen),
+             risk_prediction_5yr_scaled_gen(fit_ph_scaled_con_gen), make.row.names =FALSE) %>% 
+  mutate(Model = c("With all patients", "With Control patients")) %>% relocate(Model)
+
+# test %>% flextable() %>% set_caption("5 year Risk estimate example for a patient using model with genetic variables ")
+#   
+
+test %>% mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  kable( caption = "5 year Risk estimate example for a patient using model with genetic variables ")
+
+```
+
+
+
+# Categorical case : Categorizing Covariates based on bins in OHTS Point System Risk Calculator
+
+Due to perfect separation in last bin of avg_PSD variable which caused convergence issues, we combined the last two bins for that variable.
+
+## Fitting cox model without genetic variables using all patients.
+\footnotesize
+```{r}
+
+fit_ph_cat = coxph(Surv(followup, poag == 1) ~ age_cat + avg_base_iop_cat + avg_cct_cat + avg_base_vcdr_cat + avg_psd_cat ,
+               control = coxph.control(
+    iter.max = 50,  # maximum iterations (default is 20)
+    eps = 1e-9, # convergence tolerance
+    toler.chol = 1e-12 # tolerance for matrix singularity
+  ),
+  data = final_data_adjusted)
+
+
+hr_table_cat <- broom::tidy(fit_ph_cat, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat$n,
+         `No.of events` = fit_ph_cat$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 5)))
+
+#knitr::kable(hr_table)
+#flextable( hr_table_cat) %>% set_caption("Final Multivariate Categorical-based Model using all patients")
+
+kable(hr_table_cat %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "Final Multivariate Categorical-based Model using all patients")
+```
+
+
+## Same results after changing labels of risk factors to prefered displayed labels.
+```{r}
+age_display <- c("< 45 years", "45–54 years", "55–64 years", "65–74 years", "≥ 75 years")
+iop_display <- c("< 22 mmHg", "22–23 mmHg", "24–25 mmHg", "26–27 mmHg", "≥ 28 mmHg")
+# For CCT you used reversed labels (4:0), but model expects factor levels
+cct_display <- c("≤ 525 µm (thinner)", "526–550 µm", "551–575 µm", "576–600 µm", "≥ 600 µm (thicker)")
+vcdr_display <- c("< 0.3", "0.3–0.39", "0.4–0.49", "0.5–0.59", "≥ 0.6")
+psd_display <- c("< 1.8 dB", "1.8–1.99 dB", "2.0–2.39 dB", "≥ 2.4 dB")
+
+final_data_adjusted_cat <- final_data_adjusted %>% 
+    mutate(
+      age_cat = factor(age_cat, labels =  age_display),
+      avg_base_iop_cat = factor(avg_base_iop_cat, labels =  iop_display),
+      avg_cct_cat = factor(avg_cct_cat, labels = cct_display),
+      avg_base_vcdr_cat = factor(avg_base_vcdr_cat, labels =  vcdr_display),
+      avg_psd_cat = factor(avg_psd_cat, labels =  psd_display)
+      
+    )
+
+
+fit_ph_cat_label = coxph(Surv(followup, poag == 1) ~ age_cat + avg_base_iop_cat + avg_cct_cat + avg_base_vcdr_cat + avg_psd_cat ,
+               control = coxph.control(
+    iter.max = 50,  # maximum iterations (default is 20)
+    eps = 1e-9, # convergence tolerance
+    toler.chol = 1e-12 # tolerance for matrix singularity
+  ),
+  data = final_data_adjusted_cat)
+
+
+hr_table_cat <- broom::tidy(fit_ph_cat_label, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat_label$n,
+         `No.of events` = fit_ph_cat_label$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 5)))
+
+#knitr::kable(hr_table)
+#flextable( hr_table_cat) %>% set_caption("Final Multivariate Categorical-based Model using all patients")
+
+kable(hr_table_cat %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "Final Multivariate Categorical-based Model using all patients")
+
+
+```
+
+
+
+## Fitting cox model with genetic variables using all patients
+\footnotesize
+```{r}
+
+fit_ph_cat_gen = coxph(Surv(followup, poag == 1) ~ age_cat + avg_base_iop_cat + avg_cct_cat + avg_base_vcdr_cat + avg_psd_cat  + TMCO1_cat + `CDKN2B-AS1_cat` + `ADAMTS18/NUDT7_cat`+ PLCE1_cat + GABRG2_cat,
+    control = coxph.control(
+    iter.max = 50,  # maximum iterations (default is 20)
+    eps = 1e-9, # convergence tolerance
+    toler.chol = 1e-12 # tolerance for matrix singularity
+  ),
+  data = final_data_adjusted)
+# summary(fit_ph_cat)
+
+hr_table_cat_gen <- broom::tidy(fit_ph_cat_gen, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat_gen$n,
+         `No.of events` = fit_ph_cat_gen$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 5)))
+
+
+#knitr::kable(hr_table)
+# flextable( hr_table_cat_gen) %>% set_caption("Final Multivariate Categorical-based Model with genetic variables using all patients")
+
+kable(hr_table_cat_gen %>% mutate(across(where(is.numeric), ~ round(.x, 4))),
+      caption ="Final Multivariate Categorical-based Model with genetic variables using all patients" )
+```
+
+
+## Same Results after changing labels of risk factors to prefered displayed labels.
+```{r}
+fit_ph_cat_gen_label = coxph(Surv(followup, poag == 1) ~ age_cat + avg_base_iop_cat + avg_cct_cat + avg_base_vcdr_cat + avg_psd_cat  + TMCO1_cat + `CDKN2B-AS1_cat` + `ADAMTS18/NUDT7_cat`+ PLCE1_cat + GABRG2_cat,
+    control = coxph.control(
+    iter.max = 50,  # maximum iterations (default is 20)
+    eps = 1e-9, # convergence tolerance
+    toler.chol = 1e-12 # tolerance for matrix singularity
+  ),
+  data = final_data_adjusted_cat)
+# summary(fit_ph_cat)
+
+hr_table_cat_gen <- broom::tidy(fit_ph_cat_gen_label, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat_gen_label$n,
+         `No.of events` = fit_ph_cat_gen_label$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 5)))
+
+
+#knitr::kable(hr_table)
+# flextable( hr_table_cat_gen) %>% set_caption("Final Multivariate Categorical-based Model with genetic variables using all patients")
+
+kable(hr_table_cat_gen %>% mutate(across(where(is.numeric), ~ round(.x, 4))),
+      caption ="Final Multivariate Categorical-based Model with genetic variables using all patients" )
+```
+
+
+## Fitting cox model without genetic variables using only control  patients
+\footnotesize
+```{r}
+fit_ph_cat_con = coxph(Surv(followup, poag == 1) ~ age_cat + avg_base_iop_cat + avg_cct_cat + avg_base_vcdr_cat + avg_psd_cat ,
+               control = coxph.control(
+    iter.max = 50,  # maximum iterations (default is 20)
+    eps = 1e-9, # convergence tolerance
+    toler.chol = 1e-12 # tolerance for matrix singularity
+  ),
+  data = final_data_adj_control)
+
+hr_table_cat_con <- broom::tidy(fit_ph_cat_con, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat_con$n,
+         `No.of events` = fit_ph_cat_con$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 5)))
+
+
+#knitr::kable(hr_table)
+#flextable( hr_table_cat_con) %>% set_caption("Final Multivariate Categorical-based Model using only control patients")
+
+kable(hr_table_cat_con %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "Final Multivariate Categorical-based Model using only control patients")
+
+```
+
+
+```{r}
+age_display <- c("< 45 years", "45–54 years", "55–64 years", "65–74 years", "≥ 75 years")
+iop_display <- c("< 22 mmHg", "22–23 mmHg", "24–25 mmHg", "26–27 mmHg", "≥ 28 mmHg")
+# For CCT you used reversed labels (4:0), but model expects factor levels
+cct_display <- c("≤ 525 µm (thinner)", "526–550 µm", "551–575 µm", "576–600 µm", "≥ 600 µm (thicker)")
+vcdr_display <- c("< 0.3", "0.3–0.39", "0.4–0.49", "0.5–0.59", "≥ 0.6")
+psd_display <- c("< 1.8 dB", "1.8–1.99 dB", "2.0–2.39 dB", "≥ 2.4 dB")
+
+final_data_adj_control_cat <- final_data_adj_control %>% 
+    mutate(
+      age_cat = factor(age_cat, labels =  age_display),
+      avg_base_iop_cat = factor(avg_base_iop_cat, labels =  iop_display),
+      avg_cct_cat = factor(avg_cct_cat, labels = cct_display),
+      avg_base_vcdr_cat = factor(avg_base_vcdr_cat, labels =  vcdr_display),
+      avg_psd_cat = factor(avg_psd_cat, labels =  psd_display)
+      
+    )
+
+
+fit_ph_cat_con_label = coxph(Surv(followup, poag == 1) ~ age_cat + avg_base_iop_cat + avg_cct_cat + avg_base_vcdr_cat + avg_psd_cat ,
+               control = coxph.control(
+    iter.max = 50,  # maximum iterations (default is 20)
+    eps = 1e-9, # convergence tolerance
+    toler.chol = 1e-12 # tolerance for matrix singularity
+  ),
+  data = final_data_adj_control_cat, x = TRUE, y= TRUE)
+
+hr_table_cat_con <- broom::tidy(fit_ph_cat_con_label, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat_con_label$n,
+         `No.of events` = fit_ph_cat_con_label$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 5)))
+
+
+#knitr::kable(hr_table)
+#flextable( hr_table_cat_con) %>% set_caption("Final Multivariate Categorical-based Model using only control patients")
+
+kable(hr_table_cat_con %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "Final Multivariate Categorical-based Model using only control patients")
+```
+
+
+
+
+## Fitting cox model with genetic variables using only control patients
+\footnotesize
+```{r}
+fit_ph_cat_con_gen = coxph(Surv(followup, poag == 1) ~ age_cat + avg_base_iop_cat + avg_cct_cat +
+                             avg_base_vcdr_cat + avg_psd_cat  + TMCO1_cat + `CDKN2B-AS1_cat` +
+                             `ADAMTS18/NUDT7_cat`+ PLCE1_cat + GABRG2_cat ,
+               control = coxph.control(
+    iter.max = 50,  # maximum iterations (default is 20)
+    eps = 1e-9, # convergence tolerance
+    toler.chol = 1e-12 # tolerance for matrix singularity
+  ),
+  data = final_data_adj_control)
+
+hr_table_cat_con_gen <- broom::tidy(fit_ph_cat_con_gen, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat_con_gen$n,
+         `No.of events` = fit_ph_cat_con_gen$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 5)))
+
+
+#knitr::kable(hr_table_cat_con_gen)
+# flextable( hr_table_cat_con_gen) %>% set_caption("Final Multivariate Categorical-based Model using only control patients")
+kable(hr_table_cat_con_gen %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "Final Multivariate Categorical-based Model with gebetic variables using only control patients")
+
+
+```
+
+
+```{r}
+
+
+fit_ph_cat_con_gen_label = coxph(Surv(followup, poag == 1) ~ age_cat + avg_base_iop_cat + avg_cct_cat +
+                             avg_base_vcdr_cat + avg_psd_cat  + TMCO1_cat + `CDKN2B-AS1_cat` +
+                             `ADAMTS18/NUDT7_cat`+ PLCE1_cat + GABRG2_cat ,
+               control = coxph.control(
+    iter.max = 50,  # maximum iterations (default is 20)
+    eps = 1e-9, # convergence tolerance
+    toler.chol = 1e-12 # tolerance for matrix singularity
+  ),
+  data = final_data_adj_control_cat, x = TRUE, y= TRUE)
+
+hr_table_cat_con_gen <- broom::tidy(fit_ph_cat_con_gen_label, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate( n= fit_ph_cat_con_gen_label$n,
+         `No.of events` = fit_ph_cat_con_gen_label$nevent) %>%
+  rename(`Baseline Variable` = term, HR = estimate, `95% Lower CI` = conf.low,
+         `95% Upper CI` = conf.high, `P Value`= p.value)%>%
+  relocate(c(n,`No.of events` ), .after = `Baseline Variable`) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 5)))
+
+
+#knitr::kable(hr_table_cat_con_gen)
+# flextable( hr_table_cat_con_gen) %>% set_caption("Final Multivariate Categorical-based Model using only control patients")
+kable(hr_table_cat_con_gen %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "Final Multivariate Categorical-based Model with gebetic variables using only control patients")
+
+
+```
+
+
+## Risk Calculator for prediction example 
+### using categorical-based model without genetic variables with all patients vs control patients
+\footnotesize
+```{r}
+risk_prediction_5yr_cat = function(fit, 
+                           age = 2, avg_iop =1, avg_cct = 3, avg_vcdr =4, avg_psd=3){
+  
+  
+  newdata = data.frame(
+  age_cat = factor(age, levels = fit$xlevels$age_cat),
+    avg_base_iop_cat = factor(avg_iop, levels = fit$xlevels$avg_base_iop_cat),
+    avg_cct_cat = factor(avg_cct, levels = fit$xlevels$avg_cct_cat),
+    avg_base_vcdr_cat = factor(avg_vcdr, levels = fit$xlevels$avg_base_vcdr_cat),
+    avg_psd_cat = factor(avg_psd, levels = fit$xlevels$avg_psd_cat)
+)
+
+   
+  pred.surv_cat = survfit(fit, newdata = newdata)
+  
+  
+  surv_5yr = summary( pred.surv_cat, times = 5)$surv 
+  risk_5yr = 1 - surv_5yr
+  
+  
+  X_new <- model.matrix(delete.response(terms(fit)), newdata)[, -1, drop = FALSE]
+  #PI_m <- as.numeric(X_new %*% coef(fit))
+  PI <- predict(fit, newdata = newdata, type = "lp")
+
+  
+  return(data.frame(
+    time_point = "5 years",
+    PI = PI,
+    risk_5yr = risk_5yr
+  ))
+}
+
+test = rbind(risk_prediction_5yr_cat(fit_ph_cat), #, final_data_adjusted),
+             risk_prediction_5yr_cat(fit_ph_cat_con), #, final_data_adj_control),
+             make.row.names =FALSE) %>% 
+  mutate(Model = c("With all patients", "With Control patients")) %>% relocate(Model)
+
+# test %>% flextable() %>% 
+#   set_caption("5 year Risk estimate example for a patient using Categorical-based model ")
+
+kable(test %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "5 year Risk estimate example for a patient using Categorical-based model")
+
+
+```
+
+
+## Alternative
+
+```{r}
+risk_prediction_5yr_cat = function(fit, 
+                           #age = 2, avg_iop =1, avg_cct = 3, avg_vcdr =4, avg_psd=3
+                           age = "55–64 years",  # 2
+                           avg_iop = "22–23 mmHg",  # 1
+                           avg_cct = "526–550 µm", # 3
+                           avg_vcdr = "≥ 0.6",   #4
+                           avg_psd = "≥ 2.4 dB" #3
+                           ){
+  
+  
+  newdata = data.frame(
+  age_cat = factor(age, levels = fit$xlevels$age_cat),
+    avg_base_iop_cat = factor(avg_iop, levels = fit$xlevels$avg_base_iop_cat),
+    avg_cct_cat = factor(avg_cct, levels = fit$xlevels$avg_cct_cat),
+    avg_base_vcdr_cat = factor(avg_vcdr, levels = fit$xlevels$avg_base_vcdr_cat),
+    avg_psd_cat = factor(avg_psd, levels = fit$xlevels$avg_psd_cat)
+)
+
+   
+  pred.surv_cat = survfit(fit, newdata = newdata)
+  
+  
+  surv_5yr = summary( pred.surv_cat, times = 5)$surv 
+  risk_5yr = 1 - surv_5yr
+  
+  
+  X_new <- model.matrix(delete.response(terms(fit)), newdata)[, -1, drop = FALSE]
+  #PI_m <- as.numeric(X_new %*% coef(fit))
+  PI <- predict(fit, newdata = newdata, type = "lp")
+
+  
+  return(data.frame(
+    time_point = "5 years",
+    PI = PI,
+    risk_5yr = risk_5yr
+  ))
+}
+
+test = rbind(risk_prediction_5yr_cat(fit_ph_cat_label), #, final_data_adjusted),
+             risk_prediction_5yr_cat(fit_ph_cat_con_label), #, final_data_adj_control),
+             make.row.names =FALSE) %>% 
+  mutate(Model = c("With all patients", "With Control patients")) %>% relocate(Model)
+
+# test %>% flextable() %>% 
+#   set_caption("5 year Risk estimate example for a patient using Categorical-based model ")
+
+kable(test %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "5 year Risk estimate example for a patient using Categorical-based model")
+
+
+```
+
+
+### using categorical-based model with genetic variables with all patients vs control patients
+
+```{r}
+risk_prediction_5yr_cat_gen <- function(fit,
+                          age = 2,
+                          avg_iop =1,
+                          avg_cct = 3,
+                          avg_vcdr =4,
+                          avg_psd=3,
+                          TMCO1 = "A/A" ,
+                          CDKN2B.AS1 ="A/A", 
+                          ADAMTS18.NUDT7 = "C/C",
+                          PLCE1 ="A/A",
+                          GABRG2="G/G") {
+
+  newdata <- data.frame(
+    age_cat = factor(age, levels = fit$xlevels$age_cat),
+    avg_base_iop_cat = factor(avg_iop, levels = fit$xlevels$avg_base_iop_cat),
+    avg_cct_cat = factor(avg_cct, levels = fit$xlevels$avg_cct_cat),
+    avg_base_vcdr_cat = factor(avg_vcdr, levels = fit$xlevels$avg_base_vcdr_cat),
+    avg_psd_cat = factor(avg_psd, levels = fit$xlevels$avg_psd_cat),
+    TMCO1_cat = factor(TMCO1, levels = fit$xlevels$TMCO1_cat),
+    `CDKN2B-AS1_cat` = factor(CDKN2B.AS1, levels = fit$xlevels$`CDKN2B-AS1_cat`),
+    `ADAMTS18/NUDT7_cat` = factor(ADAMTS18.NUDT7, levels = fit$xlevels$`ADAMTS18/NUDT7_cat`),
+    PLCE1_cat = factor(PLCE1, levels = fit$xlevels$PLCE1_cat),
+    GABRG2_cat = factor(GABRG2, levels = fit$xlevels$GABRG2_cat),
+    check.names = FALSE
+  )
+
+  pred.surv <- survfit(fit, newdata = newdata)
+  surv_5yr <- summary(pred.surv, times = 5)$surv
+  risk_5yr <- 1 - surv_5yr
+
+  PI <- predict(fit, newdata = newdata, type = "lp")
+
+  data.frame(
+    time_point = "5 years",
+    PI = PI,
+    risk_5yr = risk_5yr
+  )
+}
+
+test = rbind(risk_prediction_5yr_cat_gen(fit_ph_cat_gen),
+             risk_prediction_5yr_cat_gen(fit_ph_cat_con_gen), make.row.names =FALSE) %>% 
+  mutate(Model = c("With all patients", "With Control patients")) %>% relocate(Model)
+
+# test %>% flextable() %>% 
+#   set_caption("5 year Risk estimate example for a patient using Categorical-based model ")
+ 
+kable(test %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "5 year Risk estimate example for a patient using Categorical-based model with genetic variables")
+
+
+
+#save(fit_ph_scaled_con, fit_ph_cat_con, fit_ph_scaled_con_gen, fit_ph_cat_con_gen, final_data_adj_control,
+#     file = "models_and_data.RData")
+# risk_prediction_5yr_cat_gen(fit_ph_cat_con_gen)
+
+```
+
+
+
+## Alternatve
+```{r}
+risk_prediction_5yr_cat_gen <- function(fit,
+                           age = "55–64 years",  # 2
+                           avg_iop = "22–23 mmHg",  # 1
+                           avg_cct = "526–550 µm", # 3
+                           avg_vcdr = "≥ 0.6",   #4
+                           avg_psd = "≥ 2.4 dB", #3
+                           TMCO1 = "A/A",
+                           CDKN2B.AS1 = "A/A",
+                           ADAMTS18.NUDT7 = "C/C",
+                           PLCE1 = "A/A",
+                           GABRG2 = "G/G") {
+
+  newdata <- data.frame(
+    age_cat = factor(age, levels = fit$xlevels$age_cat),
+    avg_base_iop_cat = factor(avg_iop, levels = fit$xlevels$avg_base_iop_cat),
+    avg_cct_cat = factor(avg_cct, levels = fit$xlevels$avg_cct_cat),
+    avg_base_vcdr_cat = factor(avg_vcdr, levels = fit$xlevels$avg_base_vcdr_cat),
+    avg_psd_cat = factor(avg_psd, levels = fit$xlevels$avg_psd_cat),
+    TMCO1_cat = factor(TMCO1, levels = fit$xlevels$TMCO1_cat),
+    `CDKN2B-AS1_cat` = factor(CDKN2B.AS1, levels = fit$xlevels$`CDKN2B-AS1_cat`),
+    `ADAMTS18/NUDT7_cat` = factor(ADAMTS18.NUDT7, levels = fit$xlevels$`ADAMTS18/NUDT7_cat`),
+    PLCE1_cat = factor(PLCE1, levels = fit$xlevels$PLCE1_cat),
+    GABRG2_cat = factor(GABRG2, levels = fit$xlevels$GABRG2_cat),
+    check.names = FALSE
+  )
+
+  pred.surv <- survfit(fit, newdata = newdata)
+  surv_5yr <- summary(pred.surv, times = 5)$surv
+  risk_5yr <- 1 - surv_5yr
+
+  PI <- predict(fit, newdata = newdata, type = "lp")
+
+  data.frame(
+    time_point = "5 years",
+    PI = PI,
+    risk_5yr = risk_5yr
+  )
+}
+
+test = rbind(risk_prediction_5yr_cat_gen(fit_ph_cat_gen_label),
+             risk_prediction_5yr_cat_gen(fit_ph_cat_con_gen_label), make.row.names =FALSE) %>% 
+  mutate(Model = c("With all patients", "With Control patients")) %>% relocate(Model)
+
+# test %>% flextable() %>% 
+#   set_caption("5 year Risk estimate example for a patient using Categorical-based model ")
+ 
+kable(test %>% mutate(across(where(is.numeric), ~ round(.x, 4))), 
+      caption = "5 year Risk estimate example for a patient using Categorical-based model with genetic variables")
+```
+
+
+```{r, eval=FALSE}
+
+#age = 2, avg_iop =1, avg_cct = 3, avg_vcdr =4, avg_psd=3
+
+nd = data.frame(
+  age_decade =  age/10,
+  avg_base_iop = avg_iop ,
+  avg_cct_per40_thinner = avg_cct / 40,
+  avg_base_vcdr_per01 = avg_vcdr / 0.1,
+  avg_psd_per02 = avg_psd / 0.2,
+  TMCO1_cat = factor(TMCO1, levels = c( "A/A", "A/B", "B/B")),
+    `CDKN2B-AS1_cat` = factor(CDKN2B.AS1, levels = c( "A/A", "A/B", "B/B")),
+    `ADAMTS18/NUDT7_cat` =factor(ADAMTS18.NUDT7, levels = c("C/C", "T/C", "T/T")),
+    PLCE1_cat =factor(PLCE1, levels = c( "A/A", "A/B", "B/B")),
+    GABRG2_cat =factor(GABRG2, levels = c( "G/G", "T/G", "T/T")), check.names = FALSE
+)
+
+```
+
+
+
+
+```{r, eval=FALSE}
+## More evidence on CCT since HR < 1
+
+## We check the functional form of CCT using quartile design variable approach
+final_data_adjusted_cct <- final_data_adjusted %>%
+  mutate(avg_cct_quartile = cut(avg_cct,
+                                breaks = quantile(avg_cct,  na.rm = TRUE),
+                                include.lowest = TRUE,
+                                labels = paste0("Q", 1:4)))
+
+
+cox_fit_cct_quartile = coxph(Surv(followup, poag==1) ~ avg_cct_quartile ,
+                             data = final_data_adjusted_cct)
+
+time_point <- 5  # years
+  
+
+# Hazard Ratios of each quartile vs first quartile
+HR_cct_5 = summary(cox_fit_cct_quartile, times = time_point)$coefficients[, "exp(coef)"]
+
+# Survival Prediction
+surv_cct_quartile <- survfit(cox_fit_cct_quartile, newdata = data.frame(
+  avg_cct_quartile = factor(1:4, labels =  paste0("Q", 1:4))
+))
+
+#summary(surv_cct_quartile)
+
+s5 <- summary(surv_cct_quartile, times = time_point)$surv
+
+plot(1:4, s5, type = "b", pch = 19, col = "blue",
+     xlab = " Quartiles", ylab = "5-Year Survival Probability",
+     main = "Functional Form of avg_cct via Quartiles")
+
+# 
+# plot(c(0.5, 0.75, 1), HR_cct_5, type = "b", pch = 19, col = "blue",
+#      xlab = " Quartiles", ylab = "5-Year HR vs CCT First Quartile",
+#      main = "Functional Form of avg_cct via Quartiles")
+
+
+```
+
+
+
+```{r, eval=FALSE}
+## We plot the survival probability for each quartile in one plot
+
+plot(surv_cct_quartile, 
+     col = c("darkblue", "dodgerblue3", "goldenrod2", "firebrick3"),
+     lwd = 2, 
+     xlab = "Follow-up Time (Years)", 
+     ylab = "Survival Probability",
+     main = "Survival Curves by avg_cct Quartile")
+
+legend("bottomleft", legend = paste("Quartile", 1:4),
+       col = c("darkblue", "dodgerblue3", "goldenrod2", "firebrick3"),
+       lwd = 2, bty = "n")
+
+```
+
+
+
+```{r, eval=FALSE}
+
+tinytex::install_tinytex()   # needed if you want PDF report generation
+# in your R session where models exist:
+save(fit_ph_scaled_con, fit_ph_cat_con, final_data_adj_control, file = "models_and_data.RData")
+
+cat_labels <- list(
+  age_cat = setNames(levels(final_data_adj_control$age_cat), 
+                     c("<45", "45 to <55", "55 to <65",  "65 to <75", "75+")),
+  
+  avg_base_iop_cat = setNames(levels(final_data_adj_control$avg_base_iop_cat),
+                              c("<22 mmHg", "22 to <24 mmHg", "24 to <26 mmHg", "26 to <28 mmHg", "28+ mmHg")),
+  
+  avg_cct_cat = setNames(levels(final_data_adj_control$avg_cct_cat),
+                         c(">600 µm", "<=525 µm", "526 to 550 µm", "551 to 575 µm", "576 to 600 µm")),
+  
+  avg_base_vcdr_cat = setNames(levels(final_data_adj_control$avg_base_vcdr_cat),
+                               c("<0.3", "0.3 to 0.4", "0.4 to <0.5", "0.5 to <0.6", "0.6+")),
+  
+  avg_psd_cat = setNames(levels(final_data_adj_control$avg_psd_cat),
+                         c("<1.8 dB", "1.8 to <2.0 dB", "2.0 to <2.4 dB", "2.4 + dB"))
+)
+
+```
+
+
+
+```{r, eval=FALSE}
+load("risk_models_new.RData")
+
+save(
+  fit_ph_scaled_con,
+  fit_ph_cat_con_label,
+  fit_ph_scaled_con_gen,
+  fit_ph_cat_con_gen_label,
+  file = "risk_models_new.RData"
+)
+
+
+"rsconnect::deployApp(
++     appDir = 'C:/Users/dkakou/OneDrive - University of Iowa/Risk_calculator RA/Poag_ShinyApp/glaucom_risk_calculator',
++     appName = "glaucom_risk_calculator",
++     account = "dkakou",
++     appMode = "shiny",
++     forceUpdate = TRUE
++ )"
+
+newdata_cat <- data.frame(
+    age_cat          = factor(input$age_cat,          levels = fit_ph_cat_con$xlevels$age_cat),
+    avg_base_iop_cat = factor(input$iop_cat,          levels = fit_ph_cat_con$xlevels$avg_base_iop_cat),
+    avg_cct_cat      = factor(input$cct_cat,          levels = fit_ph_cat_con$xlevels$avg_cct_cat),
+    avg_base_vcdr_cat= factor(input$vcdr_cat,         levels = fit_ph_cat_con$xlevels$avg_base_vcdr_cat),
+    avg_psd_cat      = factor(input$psd_cat,          levels = fit_ph_cat_con$xlevels$avg_psd_cat)
+  )
+```
+
+
+
+## Performance metrics for JSM poster
+
+```{r}
+library(survival)
+library(timeROC)
+library(survcomp)
+library(dplyr)
+
+form_clin <- Surv(followup, poag == 1) ~
+  age_decade + avg_base_iop + avg_cct_per40_thinner +
+  avg_base_vcdr_per01 + avg_psd_per02
+
+form_gen <- Surv(followup, poag == 1) ~
+  age_decade + avg_base_iop + avg_cct_per40_thinner +
+  avg_base_vcdr_per01 + avg_psd_per02 +
+  TMCO1_cat + `CDKN2B-AS1_cat` + `ADAMTS18/NUDT7_cat` +
+  PLCE1_cat + GABRG2_cat
+
+
+## 10 fold CV
+set.seed(123)
+
+K <- 10
+n <- nrow(final_data_adj_control)
+
+fold_id <- sample(rep(1:K, length.out = n))
+risk_clin_oof <- rep(NA, n)
+risk_gen_oof  <- rep(NA, n)
+for(k in 1:K){
+
+  train_data <- final_data_adj_control[fold_id != k, ]
+  test_data  <- final_data_adj_control[fold_id == k, ]
+
+  ## Fit models on TRAIN
+  fit_clin <- coxph(form_clin, data=train_data, x=TRUE)
+  fit_gen  <- coxph(form_gen,  data=train_data, x=TRUE)
+
+  ## Predict on TEST (linear predictor)
+  risk_clin_oof[fold_id == k] <-
+    predict(fit_clin, newdata=test_data, type="lp")
+
+  risk_gen_oof[fold_id == k] <-
+    predict(fit_gen, newdata=test_data, type="lp")
+}
+
+
+## C-index
+cindex_clin <- concordance.index(
+  x = risk_clin_oof,
+  surv.time = final_data_adj_control$followup,
+  surv.event = final_data_adj_control$poag
+)
+
+cindex_gen <- concordance.index(
+  x = risk_gen_oof,
+  surv.time = final_data_adj_control$followup,
+  surv.event = final_data_adj_control$poag
+)
+
+
+cindex_clin$c.index
+cindex_gen$c.index
+
+
+
+```
+
+
+## Concordance index
+```{r}
+
+set.seed(123)
+
+train_index <- sample(
+  1:nrow(final_data_adj_control),
+  size = 0.7 * nrow(final_data_adj_control)
+)
+
+train_data <- final_data_adj_control[train_index, ]
+test_data  <- final_data_adj_control[-train_index, ]
+
+summary(fit_ph_scaled_con)$concordance
+summary(fit_ph_scaled_con_gen)$concordance
+
+```
+
+
+```{r}
+library(survcomp)
+
+lp_clin <- predict(fit_ph_scaled_con, type = "lp")
+lp_gen  <- predict(fit_ph_scaled_con_gen, type = "lp")
+
+cindex_clin <- concordance.index(
+  x = lp_clin,
+  surv.time = final_data_adj_control$followup,
+  surv.event = final_data_adj_control$poag
+)
+
+cindex_gen <- concordance.index(
+  x = lp_gen,
+  surv.time = final_data_adj_control$followup,
+  surv.event = final_data_adj_control$poag
+)
+
+
+```
+
+
+## Time dependent AUC
+```{r}
+t_eval <- 5
+
+roc_clin <- timeROC(
+  T = final_data_adj_control$followup,
+  delta = final_data_adj_control$poag,
+  marker = risk_clin_oof,
+  cause = 1,
+  times = t_eval,
+  iid = TRUE
+)
+
+roc_gen <- timeROC(
+  T = final_data_adj_control$followup,
+  delta = final_data_adj_control$poag,
+  marker = risk_gen_oof,
+  cause = 1,
+  times = t_eval,
+  iid = TRUE
+)
+
+
+plot(roc_clin, time=t_eval, col="black", lwd=2)
+plot(roc_gen, time=t_eval, add=TRUE, col="red", lwd=2)
+
+abline(0,1,lty=2)
+
+legend("bottomright",
+       legend=c(
+         paste0("Clinical (AUC=", round(roc_clin$AUC[2],3),")"),
+         paste0("Clinical+Genetic (AUC=", round(roc_gen$AUC[2],3),")")
+       ),
+       col=c("black","red"),
+       lwd=2)
+
+```
+
+
+```{r}
+#install.packages("timeROC")
+library(timeROC)
+## compute risk scores
+risk_clin <- predict(fit_ph_scaled_con, type="lp")
+risk_gen  <- predict(fit_ph_scaled_con_gen, type="lp")
+
+t_eval <- 5
+## Cal AUC
+roc_clin <- timeROC(
+  T = final_data_adj_control$followup,
+  delta = final_data_adj_control$poag,
+  marker = risk_clin,
+  cause = 1,
+  times = t_eval,
+  iid = TRUE
+)
+
+roc_gen <- timeROC(
+  T = final_data_adj_control$followup,
+  delta = final_data_adj_control$poag,
+  marker = risk_gen,
+  cause = 1,
+  times = t_eval,
+  iid = TRUE
+)
+
+roc_clin$AUC
+roc_gen$AUC
+
+```
+```{r}
+plot(roc_clin, time = t_eval)
+plot(roc_gen, time= t_eval,col= "blue", add=TRUE)
+legend("bottomright", c("Clinical","Clinical+Genetic"), col = c("red", "blue"), lty=1:2)
+
+```
+
+
+```{r}
+plot(roc_clin,
+      title = "ROC at time 5 years",
+     time = t_eval,
+     col = "black",
+     lwd = 2)
+
+plot(roc_gen,
+     time = t_eval,
+     add = TRUE,
+     col = "red",
+     lwd = 2)
+
+abline(0,1,lty=2)
+
+legend("bottomright",
+       legend=c(
+         paste0("Clinical (AUC=", as.character(round(roc_clin$AUC[2],3)),")"),
+         paste0("Clinical+Genetic (AUC=",as.character(round(roc_gen$AUC[2],3)),")")
+       ),
+       col=c("black","red"),
+       lwd=2)
+title( main = "ROC at time 5 years")
+```
+
+
+## Calibration Plot
+```{r}
+library(survival)
+
+basehaz_gen <- basehaz(fit_ph_scaled_con_gen, centered=FALSE)
+H0_5 <- basehaz_gen$hazard[which.min(abs(basehaz_gen$time - 5))]
+S0_5 <- exp(-H0_5)
+lp_gen <- predict(fit_ph_scaled_con_gen, type="lp")
+
+pred_risk_gen <- 1 - (S0_5 ^ exp(lp_gen))
+
+
+##Calibration curve
+library(riskRegression)
+
+cal <- Score(
+  list(
+    clinical = fit_ph_scaled_con,
+    genetic = fit_ph_scaled_con_gen
+  ),
+  formula = Surv(followup, poag==1) ~ 1,
+  data = final_data_adj_control,
+  metrics = "Brier",
+  plots = "calibration",
+  times = 5
+)
+
+plotCalibration(cal)
+
+```
+
+##NRI/IDI(INcremental value of Genetics)
+```{r}
+#install.packages("survIDINRI")
+library(survIDINRI)
+IDI.INF(
+  data.frame( T = final_data_adj_control$followup,
+  delta = final_data_adj_control$poag),
+  covs0 = risk_clin,
+  covs1 = risk_gen,
+  t0 = 5
+)
+
+
+
+```
+
+
+## DEcision Curve
+```{r}
+library(rmda)
+set.seed(123)
+dca_model <- decision_curve(
+  poag ~ risk_clin + risk_gen,
+  data = data.frame(
+    poag = final_data_adj_control$poag,
+    risk_clin = risk_clin,
+    risk_gen = risk_gen
+  ),
+  thresholds = seq(0.01,0.5,by=0.01),
+  bootstraps = 100
+)
+
+plot_decision_curve(dca_model)
+
+```
+
+
+

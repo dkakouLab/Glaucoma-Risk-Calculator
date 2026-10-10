@@ -1,0 +1,10 @@
+name: glaucom_risk_calculator
+title:
+username: dkakou
+account: dkakou
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16238363
+bundleId: 11574924
+url: https://dkakou.shinyapps.io/glaucom_risk_calculator/
+version: 1
